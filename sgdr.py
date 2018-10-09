@@ -1,8 +1,8 @@
-from keras.callbacks import Callback
+import keras
 import keras.backend as K
 import numpy as np
 
-class SGDRScheduler(Callback):
+class SGDRScheduler(keras.callbacks.Callback):
     '''Cosine annealing learning rate scheduler with periodic restarts.
     # Usage
         ```python
@@ -22,9 +22,6 @@ class SGDRScheduler(Callback):
                   Ex. To reduce the max_lr by 20% after each cycle, set this value to 0.8.
         cycle_length: Initial number of epochs in a cycle.
         mult_factor: Scale epochs_to_restart after each full cycle completion.
-    # References
-        Blog post: jeremyjordan.me/nn-learning-rate
-        Original paper: http://arxiv.org/abs/1608.03983
     '''
     def __init__(self,
                  min_lr,
