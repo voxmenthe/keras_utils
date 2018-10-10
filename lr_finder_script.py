@@ -1,89 +1,96 @@
-import keras
-import matplotlib.pyplot as plt
-
-class LRFinder(keras.callbacks.Callback):
-    
-    '''
-    A simple callback for finding the optimal learning rate range for your model + dataset. 
-
-    # Usage
-        ```python
-            lr_finder = LRFinder(min_lr=1e-5, 
-                                 max_lr=1e-2, 
-                                 steps_per_epoch=np.ceil(epoch_size/batch_size), 
-                                 epochs=3)
-            model.fit(X_train, Y_train, callbacks=[lr_finder])
-
-            lr_finder.plot_loss()
-        ```
-
-    # Arguments
-        min_lr: The lower bound of the learning rate range for the experiment.
-        max_lr: The upper bound of the learning rate range for the experiment.
-        steps_per_epoch: Number of mini-batches in the dataset. Calculated as `np.ceil(epoch_size/batch_size)`. 
-        epochs: Number of epochs to run experiment. Usually between 2 and 4 epochs is sufficient. 
-    '''
-
-    def __init__(self, min_lr=1e-5, max_lr=1e-2, steps_per_epoch=None, epochs=None):
-        super().__init__()
-
-        self.min_lr = min_lr
-        self.max_lr = max_lr
-        self.total_iterations = steps_per_epoch * epochs
-        self.iteration = 0
-        self.history = {}
-
-    def clr(self):
-        '''Calculate the learning rate.'''
-        x = self.iteration / self.total_iterations 
-        return self.min_lr + (self.max_lr-self.min_lr) * x
-
-    def on_train_begin(self, logs=None):
-        '''Initialize the learning rate to the minimum value at the start of training.'''
-        logs = logs or {}
-        K.set_value(self.model.optimizer.lr, self.min_lr)
-
-    def on_train_end(self, logs={}):
-        return
-
-    def on_batch_begin(self, batch, logs={}):
-        return
-
-    def on_batch_end(self, epoch, logs=None):
-        '''Record previous batch statistics and update the learning rate.'''
-        logs = logs or {}
-        self.iteration += 1
-
-        self.history.setdefault('lr', []).append(K.get_value(self.model.optimizer.lr))
-        self.history.setdefault('iterations', []).append(self.iteration)
-
-        for k, v in logs.items():
-            self.history.setdefault(k, []).append(v)
-
-        K.set_value(self.model.optimizer.lr, self.clr())
+from matplotlib import pyplot as plt
+import math
+from keras.callbacks import LambdaCallback
+import keras.backend as K
 
 
-    def on_epoch_begin(self, epoch, logs={}):
-        return
+class LRFinder:
+    """
+    Plots the change of the loss function of a Keras model when the learning rate is exponentially increasing.
+    """
+    def __init__(self, model):
+        self.model = model
+        self.losses = []
+        self.lrs = []
+        self.best_loss = 1e9
 
-    def on_epoch_end(self, epoch, logs={}):
-        print('hello from lr_finder')
-        return
+    def on_batch_end(self, batch, logs):
+        # Log the learning rate
+        lr = K.get_value(self.model.optimizer.lr)
+        self.lrs.append(lr)
 
-    # def plot_lr(self):
-    #     '''Helper function to quickly inspect the learning rate schedule.'''
-    #     plt.plot(self.history['iterations'], self.history['lr'])
-    #     plt.yscale('log')
-    #     plt.xlabel('Iteration')
-    #     plt.ylabel('Learning rate')
-    #     print(self.history['iterations'])
-    #     print(self.history['lr'])
+        # Log the loss
+        loss = logs['loss']
+        self.losses.append(loss)
 
-    # def plot_loss(self):
-    #     '''Helper function to quickly observe the learning rate experiment results.'''
-    #     plt.plot(self.history['lr'], self.history['loss'])
-    #     plt.xscale('log')
-    #     plt.xlabel('Learning rate')
-    #     plt.ylabel('Loss')
-    #     print(self.history['lr'])
-    #     print(self.history['loss'])
+        # Check whether the loss got too large or NaN
+        if math.isnan(loss) or loss > self.best_loss * 4:
+            self.model.stop_training = True
+            return
+
+        if loss < self.best_loss:
+            self.best_loss = loss
+
+        # Increase the learning rate for the next batch
+        lr *= self.lr_mult
+        K.set_value(self.model.optimizer.lr, lr)
+
+    def find(self, x_train, y_train, start_lr, end_lr, batch_size=64, epochs=1):
+        num_batches = epochs * x_train.shape[0] / batch_size
+        self.lr_mult = (float(end_lr) / float(start_lr)) ** (float(1) / float(num_batches))
+
+        # Save weights into a file
+        self.model.save_weights('tmp.h5')
+
+        # Remember the original learning rate
+        original_lr = K.get_value(self.model.optimizer.lr)
+
+        # Set the initial learning rate
+        K.set_value(self.model.optimizer.lr, start_lr)
+
+        callback = LambdaCallback(on_batch_end=lambda batch, logs: self.on_batch_end(batch, logs))
+
+        self.model.fit(x_train, y_train,
+                        batch_size=batch_size, epochs=epochs,
+                        callbacks=[callback])
+
+        # Restore the weights to the state before model fitting
+        self.model.load_weights('tmp.h5')
+
+        # Restore the original learning rate
+        K.set_value(self.model.optimizer.lr, original_lr)
+
+    def plot_loss(self, n_skip_beginning=10, n_skip_end=5):
+        """
+        Plots the loss.
+        Parameters:
+            n_skip_beginning - number of batches to skip on the left.
+            n_skip_end - number of batches to skip on the right.
+        """
+        plt.ylabel("loss")
+        plt.xlabel("learning rate (log scale)")
+        plt.plot(self.lrs[n_skip_beginning:-n_skip_end], self.losses[n_skip_beginning:-n_skip_end])
+        plt.xscale('log')
+        plt.show()
+
+    def plot_loss_change(self, sma=1, n_skip_beginning=10, n_skip_end=5, y_lim=(-0.01, 0.01)):
+        """
+        Plots rate of change of the loss function.
+        Parameters:
+            sma - number of batches for simple moving average to smooth out the curve.
+            n_skip_beginning - number of batches to skip on the left.
+            n_skip_end - number of batches to skip on the right.
+            y_lim - limits for the y axis.
+        """
+        assert sma >= 1
+        derivatives = [0] * sma
+        for i in range(sma, len(self.lrs)):
+            derivative = (self.losses[i] - self.losses[i - sma]) / sma
+            derivatives.append(derivative)
+
+        plt.ylabel("rate of loss change")
+        plt.xlabel("learning rate (log scale)")
+        plt.plot(self.lrs[n_skip_beginning:-n_skip_end], derivatives[n_skip_beginning:-n_skip_end])
+        plt.xscale('log')
+        plt.ylim(y_lim)
+        plt.show()
